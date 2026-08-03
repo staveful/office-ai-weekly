@@ -172,13 +172,33 @@ Expected: `site verified: 17 files`.
 Start a local server rooted at the artifact, then run:
 
 ```bash
-server_log=$(mktemp)
-python3 -m http.server 8000 --directory "$pages_artifact" >"$server_log" 2>&1 &
-server_pid=$!
-trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-python3 scripts/verify_site.py --url http://127.0.0.1:8000/
-kill "$server_pid"
-trap - EXIT
+(
+  set -e
+  server_log=$(mktemp)
+  python3 -m http.server 8000 --directory "$pages_artifact" >"$server_log" 2>&1 &
+  server_pid=$!
+  cleanup_server() {
+    status=$?
+    trap - EXIT
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+    exit "$status"
+  }
+  trap cleanup_server EXIT
+  ready=''
+  for attempt in $(seq 1 20); do
+    if curl -fsS --max-time 2 http://127.0.0.1:8000/ >/dev/null; then
+      ready=yes
+      break
+    fi
+    sleep 0.5
+  done
+  if [ "$ready" != yes ]; then
+    echo 'Local server did not become ready' >&2
+    exit 30
+  fi
+  python3 scripts/verify_site.py --url http://127.0.0.1:8000/
+)
 ```
 
 Expected: `hosted site verified`.
@@ -355,27 +375,33 @@ At every stop, leave repository visibility, billing, and workflow triggers uncha
 - [ ] **Step 1: Dispatch the exact workflow and capture its run ID**
 
 ```bash
-head_sha=$(git rev-parse HEAD)
-prior_runs=$(mktemp)
-gh api "repos/staveful/office-ai-weekly/actions/workflows/deploy-pages.yml/runs?event=workflow_dispatch&head_sha=$head_sha&per_page=100" \
-  --jq '.workflow_runs[].id' > "$prior_runs"
-gh workflow run deploy-pages.yml --ref main
-run_id=''
-for attempt in $(seq 1 30); do
-  current_runs=$(mktemp)
+(
+  set -e
+  head_sha=$(git rev-parse HEAD)
+  prior_runs=$(mktemp)
   gh api "repos/staveful/office-ai-weekly/actions/workflows/deploy-pages.yml/runs?event=workflow_dispatch&head_sha=$head_sha&per_page=100" \
-    --jq '.workflow_runs[].id' > "$current_runs"
-  while IFS= read -r candidate; do
-    if ! grep -qx "$candidate" "$prior_runs"; then
-      run_id=$candidate
-      break
-    fi
-  done < "$current_runs"
-  [ -n "$run_id" ] && break
-  sleep 2
-done
-test -n "$run_id"
-gh run watch "$run_id" --exit-status
+    --jq '.workflow_runs[].id' > "$prior_runs"
+  gh workflow run deploy-pages.yml --ref main
+  run_id=''
+  for attempt in $(seq 1 30); do
+    current_runs=$(mktemp)
+    gh api "repos/staveful/office-ai-weekly/actions/workflows/deploy-pages.yml/runs?event=workflow_dispatch&head_sha=$head_sha&per_page=100" \
+      --jq '.workflow_runs[].id' > "$current_runs"
+    while IFS= read -r candidate; do
+      if ! grep -qx "$candidate" "$prior_runs"; then
+        run_id=$candidate
+        break
+      fi
+    done < "$current_runs"
+    [ -n "$run_id" ] && break
+    sleep 2
+  done
+  if [ -z "$run_id" ]; then
+    echo 'No new workflow-dispatch run appeared after 30 polls' >&2
+    exit 31
+  fi
+  gh run watch "$run_id" --exit-status
+)
 ```
 
 - [ ] **Step 2: Read and verify the actual Pages URL**
@@ -398,7 +424,39 @@ on:
   workflow_dispatch:
 ```
 
-Run `actionlint`, preserve the archive tree, and commit with `Enable automatic Pages publishing`. Before pushing, record existing push-event runs for the new `head_sha` using the same `prior_runs` method above; push, then poll the workflow-runs API with `event=push&head_sha=$head_sha` for at most 60 seconds, select an ID absent from `prior_runs`, and pass that exact ID to `gh run watch "$run_id" --exit-status`.
+Run `actionlint`, preserve the archive tree, and commit with `Enable automatic Pages publishing`. Then capture and watch the new push-triggered run with this fail-fast block:
+
+```bash
+(
+  set -e
+  head_sha=$(git rev-parse HEAD)
+  prior_runs=$(mktemp)
+  gh api "repos/staveful/office-ai-weekly/actions/workflows/deploy-pages.yml/runs?event=push&head_sha=$head_sha&per_page=100" \
+    --jq '.workflow_runs[].id' > "$prior_runs"
+  git push
+  run_id=''
+  for attempt in $(seq 1 30); do
+    current_runs=$(mktemp)
+    gh api "repos/staveful/office-ai-weekly/actions/workflows/deploy-pages.yml/runs?event=push&head_sha=$head_sha&per_page=100" \
+      --jq '.workflow_runs[].id' > "$current_runs"
+    while IFS= read -r candidate; do
+      if ! grep -qx "$candidate" "$prior_runs"; then
+        run_id=$candidate
+        break
+      fi
+    done < "$current_runs"
+    [ -n "$run_id" ] && break
+    sleep 2
+  done
+  if [ -z "$run_id" ]; then
+    echo 'No new push run appeared after 30 polls' >&2
+    exit 32
+  fi
+  gh run watch "$run_id" --exit-status
+)
+```
+
+The 30 polls are approximately 60 seconds plus API request time.
 
 - [ ] **Step 4: Final repository and remote verification**
 
