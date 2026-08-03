@@ -105,23 +105,27 @@ def verify_directory(root_value):
     print(f"site verified: {len(actual)} files")
 
 
-def get(url):
+def get_bytes(url):
     with urlopen(url, timeout=20) as response:
         assert response.status == 200, f"HTTP {response.status}: {url}"
-        return response.read().decode("utf-8")
+        return response.read()
+
+
+def get_text(url):
+    return get_bytes(url).decode("utf-8")
 
 
 def verify_url(base):
     base = base.rstrip("/") + "/"
-    home = get(base)
+    home = get_text(base)
     assert LATEST_ENCODED in parse(home).hrefs, "hosted latest link missing"
     issue_url = urljoin(base, LATEST_ENCODED)
-    issue = get(issue_url)
+    issue = get_text(issue_url)
     for src in parse(issue).srcs:
         if src.startswith("data:"):
             continue
         safe_local_path(src)
-        get(urljoin(issue_url, src))
+        get_bytes(urljoin(issue_url, src))
     print("hosted site verified")
 
 
@@ -168,7 +172,13 @@ Expected: `site verified: 17 files`.
 Start a local server rooted at the artifact, then run:
 
 ```bash
+server_log=$(mktemp)
+python3 -m http.server 8000 --directory "$pages_artifact" >"$server_log" 2>&1 &
+server_pid=$!
+trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 python3 scripts/verify_site.py --url http://127.0.0.1:8000/
+kill "$server_pid"
+trap - EXIT
 ```
 
 Expected: `hosted site verified`.
@@ -256,7 +266,38 @@ git push
 
 - [ ] **Step 1: GET the current Pages configuration and preserve the exact response**
 
-Use the GitHub API with the authenticated CLI token, writing the response body to a temporary file and capturing the HTTP status without printing the token.
+Use the GitHub API with the authenticated CLI token, writing the response body to a temporary file and capturing the HTTP status without printing the token:
+
+```bash
+pages_body=$(mktemp)
+github_token=$(gh auth token)
+pages_status=$(curl -sS -o "$pages_body" -w '%{http_code}' \
+  -H 'Accept: application/vnd.github+json' \
+  -H "Authorization: Bearer $github_token" \
+  -H 'X-GitHub-Api-Version: 2022-11-28' \
+  'https://api.github.com/repos/staveful/office-ai-weekly/pages')
+case "$pages_status" in
+  200)
+    build_type=$(jq -r '.build_type // ""' "$pages_body")
+    if [ "$build_type" != workflow ]; then
+      printf 'Existing Pages configuration (HTTP %s):\n' "$pages_status"
+      jq . "$pages_body"
+      exit 20
+    fi
+    ;;
+  404) ;;
+  401|403)
+    printf 'Pages authentication/permission error (HTTP %s):\n' "$pages_status"
+    jq . "$pages_body"
+    exit 21
+    ;;
+  *)
+    printf 'Unexpected Pages response (HTTP %s):\n' "$pages_status"
+    jq . "$pages_body"
+    exit 22
+    ;;
+esac
+```
 
 - HTTP 200 with `build_type: workflow`: continue without POST.
 - HTTP 200 with another build type: stop and report the existing configuration rather than overwrite it.
@@ -267,6 +308,37 @@ Use the GitHub API with the authenticated CLI token, writing the response body t
 - [ ] **Step 2: Create workflow-based Pages only after a 404**
 
 Send `POST /repos/staveful/office-ai-weekly/pages` with `{"build_type":"workflow"}`.
+
+Only when the GET status was 404, run:
+
+```bash
+create_body=$(mktemp)
+create_status=$(curl -sS -o "$create_body" -w '%{http_code}' -X POST \
+  -H 'Accept: application/vnd.github+json' \
+  -H "Authorization: Bearer $github_token" \
+  -H 'X-GitHub-Api-Version: 2022-11-28' \
+  -H 'Content-Type: application/json' \
+  'https://api.github.com/repos/staveful/office-ai-weekly/pages' \
+  --data '{"build_type":"workflow"}')
+case "$create_status" in
+  201) ;;
+  401|403)
+    printf 'Pages authentication/permission error (HTTP %s):\n' "$create_status"
+    jq . "$create_body"
+    exit 23
+    ;;
+  409|422)
+    printf 'Pages setup rejected (HTTP %s):\n' "$create_status"
+    jq . "$create_body"
+    exit 24
+    ;;
+  *)
+    printf 'Unexpected Pages setup response (HTTP %s):\n' "$create_status"
+    jq . "$create_body"
+    exit 25
+    ;;
+esac
+```
 
 - HTTP 201: continue.
 - HTTP 409 or 422: stop and report the exact response. Do not assume it is a plan restriction unless the response says so.
@@ -284,12 +356,25 @@ At every stop, leave repository visibility, billing, and workflow triggers uncha
 
 ```bash
 head_sha=$(git rev-parse HEAD)
+prior_runs=$(mktemp)
+gh api "repos/staveful/office-ai-weekly/actions/workflows/deploy-pages.yml/runs?event=workflow_dispatch&head_sha=$head_sha&per_page=100" \
+  --jq '.workflow_runs[].id' > "$prior_runs"
 gh workflow run deploy-pages.yml --ref main
-```
-
-Poll `GET /repos/staveful/office-ai-weekly/actions/workflows/deploy-pages.yml/runs?event=workflow_dispatch&head_sha=$head_sha&per_page=1` until `.workflow_runs[0].id` is present, then run:
-
-```bash
+run_id=''
+for attempt in $(seq 1 30); do
+  current_runs=$(mktemp)
+  gh api "repos/staveful/office-ai-weekly/actions/workflows/deploy-pages.yml/runs?event=workflow_dispatch&head_sha=$head_sha&per_page=100" \
+    --jq '.workflow_runs[].id' > "$current_runs"
+  while IFS= read -r candidate; do
+    if ! grep -qx "$candidate" "$prior_runs"; then
+      run_id=$candidate
+      break
+    fi
+  done < "$current_runs"
+  [ -n "$run_id" ] && break
+  sleep 2
+done
+test -n "$run_id"
 gh run watch "$run_id" --exit-status
 ```
 
@@ -313,7 +398,7 @@ on:
   workflow_dispatch:
 ```
 
-Run `actionlint`, preserve the archive tree, commit with `Enable automatic Pages publishing`, push, capture the triggered run ID by head SHA, and watch that exact run to success.
+Run `actionlint`, preserve the archive tree, and commit with `Enable automatic Pages publishing`. Before pushing, record existing push-event runs for the new `head_sha` using the same `prior_runs` method above; push, then poll the workflow-runs API with `event=push&head_sha=$head_sha` for at most 60 seconds, select an ID absent from `prior_runs`, and pass that exact ID to `gh run watch "$run_id" --exit-status`.
 
 - [ ] **Step 4: Final repository and remote verification**
 
