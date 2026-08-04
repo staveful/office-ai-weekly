@@ -1,6 +1,6 @@
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit
 from urllib.request import urlopen
 import sys
 
@@ -83,7 +83,8 @@ def verify_directory(root_value):
 
 
 def get_bytes(url):
-    with urlopen(url, timeout=20) as response:
+    encoded_url = quote(url, safe=":/%?&=#")
+    with urlopen(encoded_url, timeout=20) as response:
         assert response.status == 200, f"HTTP {response.status}: {url}"
         return response.read()
 
