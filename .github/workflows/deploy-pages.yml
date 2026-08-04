@@ -25,6 +25,7 @@ jobs:
           mkdir _site
           cp index.html _site/
           cp -R issues _site/
+          cp -R assets _site/
           python3 scripts/verify_site.py _site
       - name: Configure Pages
         uses: actions/configure-pages@v5

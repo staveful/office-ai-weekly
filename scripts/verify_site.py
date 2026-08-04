@@ -2,6 +2,7 @@ from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urljoin, urlsplit
 from urllib.request import urlopen
+import posixpath
 import sys
 
 LATEST_ENCODED = "issues/M8W1/M8W1%E7%A9%97%E5%BD%A9AI%E5%8A%9E%E5%85%AC%E5%B0%8F%E6%8A%A5.html"
@@ -28,16 +29,17 @@ def parse(text):
     return references
 
 
-def safe_local_path(raw):
+def safe_asset_path(raw, issue_path):
     parts = urlsplit(raw)
     assert not parts.scheme and not parts.netloc, f"external local reference: {raw}"
     assert not parts.query and not parts.fragment, f"query or fragment not allowed: {raw}"
     decoded = unquote(parts.path)
     path = PurePosixPath(decoded)
     assert not path.is_absolute(), f"absolute path: {raw}"
-    assert ".." not in path.parts, f"path traversal: {raw}"
     assert path.suffix.lower() in IMAGE_EXTENSIONS, f"disallowed asset: {raw}"
-    return path
+    resolved = PurePosixPath(posixpath.normpath((issue_path.parent / path).as_posix()))
+    assert resolved.parts and resolved.parts[0] == "assets", f"asset outside shared directory: {raw}"
+    return resolved
 
 
 def issue_links(home_text):
@@ -65,8 +67,7 @@ def expected_files(root, home_text):
         for src in parse(issue.read_text(encoding="utf-8")).srcs:
             if src.startswith("data:"):
                 continue
-            path = safe_local_path(src)
-            expected.add((issue_path.parent / path).as_posix())
+            expected.add(safe_asset_path(src, issue_path).as_posix())
     return expected
 
 
@@ -96,13 +97,13 @@ def get_text(url):
 def verify_url(base):
     base = base.rstrip("/") + "/"
     home = get_text(base)
-    for href, _ in issue_links(home):
+    for href, issue_path in issue_links(home):
         issue_url = urljoin(base, href)
         issue = get_text(issue_url)
         for src in parse(issue).srcs:
             if src.startswith("data:"):
                 continue
-            safe_local_path(src)
+            safe_asset_path(src, issue_path)
             get_bytes(urljoin(issue_url, src))
     print("hosted site verified")
 
