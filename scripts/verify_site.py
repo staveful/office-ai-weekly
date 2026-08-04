@@ -4,7 +4,6 @@ from urllib.parse import unquote, urljoin, urlsplit
 from urllib.request import urlopen
 import sys
 
-LATEST = "issues/M8W1/M8W1穗彩AI办公小报.html"
 LATEST_ENCODED = "issues/M8W1/M8W1%E7%A9%97%E5%BD%A9AI%E5%8A%9E%E5%85%AC%E5%B0%8F%E6%8A%A5.html"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
@@ -41,24 +40,41 @@ def safe_local_path(raw):
     return path
 
 
-def expected_files(issue_text):
-    expected = {"index.html", LATEST}
-    for src in parse(issue_text).srcs:
-        if src.startswith("data:"):
+def issue_links(home_text):
+    links = []
+    for href in parse(home_text).hrefs:
+        parts = urlsplit(href)
+        if parts.scheme or parts.netloc:
             continue
-        path = safe_local_path(src)
-        expected.add((PurePosixPath(LATEST).parent / path).as_posix())
+        assert not parts.query and not parts.fragment, f"query or fragment not allowed: {href}"
+        path = PurePosixPath(unquote(parts.path))
+        if not path.parts or path.parts[0] != "issues" or path.suffix.lower() != ".html":
+            continue
+        assert not path.is_absolute() and ".." not in path.parts, f"unsafe issue link: {href}"
+        links.append((href, path))
+    assert LATEST_ENCODED in {href for href, _ in links}, "latest link missing"
+    return links
+
+
+def expected_files(root, home_text):
+    expected = {"index.html"}
+    for _, issue_path in issue_links(home_text):
+        issue = root / issue_path
+        assert issue.is_file(), f"missing issue: {issue_path}"
+        expected.add(issue_path.as_posix())
+        for src in parse(issue.read_text(encoding="utf-8")).srcs:
+            if src.startswith("data:"):
+                continue
+            path = safe_local_path(src)
+            expected.add((issue_path.parent / path).as_posix())
     return expected
 
 
 def verify_directory(root_value):
     root = Path(root_value).resolve()
     index = root / "index.html"
-    issue = root / LATEST
     assert index.is_file(), "missing index.html"
-    assert issue.is_file(), f"missing {LATEST}"
-    assert LATEST_ENCODED in parse(index.read_text(encoding="utf-8")).hrefs, "latest link missing"
-    expected = expected_files(issue.read_text(encoding="utf-8"))
+    expected = expected_files(root, index.read_text(encoding="utf-8"))
     for path in root.rglob("*"):
         assert not path.is_symlink(), f"symlink not allowed: {path}"
     actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
@@ -79,14 +95,14 @@ def get_text(url):
 def verify_url(base):
     base = base.rstrip("/") + "/"
     home = get_text(base)
-    assert LATEST_ENCODED in parse(home).hrefs, "hosted latest link missing"
-    issue_url = urljoin(base, LATEST_ENCODED)
-    issue = get_text(issue_url)
-    for src in parse(issue).srcs:
-        if src.startswith("data:"):
-            continue
-        safe_local_path(src)
-        get_bytes(urljoin(issue_url, src))
+    for href, _ in issue_links(home):
+        issue_url = urljoin(base, href)
+        issue = get_text(issue_url)
+        for src in parse(issue).srcs:
+            if src.startswith("data:"):
+                continue
+            safe_local_path(src)
+            get_bytes(urljoin(issue_url, src))
     print("hosted site verified")
 
 

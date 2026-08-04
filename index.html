@@ -111,6 +111,31 @@
       box-shadow: 0 16px 34px rgba(43, 104, 246, 0.3);
     }
     .button span { font-size: 20px; }
+    .archive {
+      margin-top: 32px;
+      padding: 28px 30px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.68);
+    }
+    .archive h3 {
+      margin: 0 0 16px;
+      font-size: 18px;
+    }
+    .archive-link {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      color: var(--ink);
+      font-weight: 650;
+      text-decoration: none;
+    }
+    .archive-link small {
+      color: var(--muted);
+      font-weight: 500;
+    }
+    .archive-link:hover { color: var(--blue); }
     footer {
       margin-top: 34px;
       color: #8993a8;
@@ -135,6 +160,14 @@
       <p class="date">2026 年 8 月 · 第 1 周</p>
       <a class="button" href="issues/M8W1/M8W1%E7%A9%97%E5%BD%A9AI%E5%8A%9E%E5%85%AC%E5%B0%8F%E6%8A%A5.html">
         查看最新一期 <span aria-hidden="true">→</span>
+      </a>
+    </section>
+
+    <section class="archive" aria-labelledby="archive-title">
+      <h3 id="archive-title">往期小报</h3>
+      <a class="archive-link" href="issues/M7W4/M7W4%E7%A9%97%E5%BD%A9AI%E5%8A%9E%E5%85%AC%E5%B0%8F%E6%8A%A5.html">
+        <span>M7W4 穗彩 AI 办公小报</span>
+        <small>2026 年 7 月 · 第 4 周 →</small>
       </a>
     </section>
 
